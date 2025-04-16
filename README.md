@@ -1,53 +1,102 @@
-# IP Lock System for FiveM - Setup Guide
+# IP Lock System for FiveM - Full Setup Guide (With Remote PHP API)
 
-This guide explains how to configure and use the IP lock authentication system for FiveM scripts. The goal is to ensure that each license key is bound to a single server IP address, preventing unauthorized use or distribution of your scripts.
+This guide explains how to set up and use the IP Lock authentication system for FiveM scripts, where each license key is linked to **a single IP address**. It also includes instructions for setting up the **PHP API backend** that will communicate securely between your script and your MySQL database.
 
 ---
 
 ## 🔧 Requirements
 
-- A remote MySQL server (can be local for testing)  
-- A licensed FiveM script  
-- The following files:  
-  - `server.lua`  
-  - `client.lua`  
-  - `config.lua`  
+- A remote web server with PHP support (Apache or Nginx)
+- A remote MySQL database (can be the same server)
+- A licensed FiveM script
+- The following files:
+  - `server.lua`
+  - `client.lua`
+  - `config.lua`
   - `fxmanifest.lua`
+  - `api.php` (your PHP backend)
 
 ---
 
 ## 📁 File Structure
 
 ```
-myScript/
-├── server.lua
-├── client.lua
-├── config.lua
-├── fxmanifest.lua
+iplock-system/
+├── api.php               # Remote PHP API (host on your webserver)
+└── fivem-resource/
+    ├── server.lua
+    ├── client.lua
+    ├── config.lua
+    └── fxmanifest.lua
 ```
 
 ---
 
 ## 1. MySQL Database Setup
 
-Create a MySQL database (e.g., `iplock`) and run the following SQL command to set up the `licenses` table:
+Create a MySQL database named `iplock` and execute the following SQL schema:
 
 ```sql
 CREATE TABLE IF NOT EXISTS licenses (
     id INT AUTO_INCREMENT PRIMARY KEY,
     license VARCHAR(255) NOT NULL UNIQUE,
     ip VARCHAR(255),
-    discord_id VARCHAR(255)
+    discord_id VARCHAR(255),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
 
-This table stores all license keys and the IP address each one is bound to.
+---
+
+## 2. PHP API Setup (api.php)
+
+Upload this file to your **remote web server**, for example: `https://yourdomain.com/api.php`
+
+```php
+<?php
+header('Content-Type: application/json');
+
+$pdo = new PDO("mysql:host=localhost;dbname=iplock;charset=utf8", "db_user", "db_password");
+
+$license = $_GET['license'] ?? null;
+$ip = $_SERVER['REMOTE_ADDR'];
+
+if (!$license) {
+    echo json_encode(['status' => 'error', 'message' => 'License is required']);
+    exit;
+}
+
+$stmt = $pdo->prepare("SELECT * FROM licenses WHERE license = ?");
+$stmt->execute([$license]);
+$data = $stmt->fetch(PDO::FETCH_ASSOC);
+
+if (!$data) {
+    echo json_encode(['status' => 'denied', 'message' => 'License not found']);
+    exit;
+}
+
+if ($data['ip'] === null) {
+    $stmt = $pdo->prepare("UPDATE licenses SET ip = ? WHERE license = ?");
+    $stmt->execute([$ip, $license]);
+    echo json_encode(['status' => 'granted', 'message' => 'IP assigned']);
+    exit;
+}
+
+if ($data['ip'] === $ip) {
+    echo json_encode(['status' => 'granted', 'message' => 'License and IP match']);
+    exit;
+}
+
+echo json_encode(['status' => 'denied', 'message' => 'Invalid IP for this license']);
+exit;
+?>
+```
+
+> 🔐 **Secure your API** with rate limiting, a secret key, or .htaccess rules in production.
 
 ---
 
-## 2. Configuration (config.lua)
-
-In `config.lua`, users must place their license key:
+## 3. config.lua (Client-side)
 
 ```lua
 Config = {}
@@ -55,26 +104,59 @@ Config = {}
 Config.License = "YOUR_LICENSE_KEY_HERE"
 ```
 
-This file is sent to users and is the only editable part of the script.
+This is the **only file the client edits**.
 
 ---
 
-## 3. Server Connection (server.lua)
+## 4. server.lua (Authentication System)
 
-The server script connects directly to your remote MySQL database. The IP verification process is as follows:
+```lua
+local licenseKey = Config.License
+local apiURL = "https://yourdomain.com/api.php?license=" .. licenseKey
 
-- If the license exists and has no IP assigned: the current server IP is saved to the database.
-- If the license has a registered IP:
-  - If it matches the current server's IP: access is granted.
-  - If it doesn't match: the script will stop and refuse authentication.
+PerformHttpRequest(apiURL, function(statusCode, response, headers)
+    if statusCode ~= 200 or not response then
+        print("[IPLOCK] Server error or unreachable.")
+        StopResource(GetCurrentResourceName())
+        return
+    end
 
-All checks are done remotely to ensure complete control.
+    local data = json.decode(response)
 
-**Note**: The `server.lua` script must be obfuscated to protect your logic and database connection.
+    if data.status == "granted" then
+        print("[IPLOCK] License is valid and IP accepted.")
+    else
+        print("[IPLOCK] License refused: " .. (data.message or "Unknown reason"))
+        sendLogToDiscord(data.message or "Refused", licenseKey)
+        StopResource(GetCurrentResourceName())
+    end
+end, "GET", "", { ["Content-Type"] = "application/json" })
+
+function sendLogToDiscord(reason, license)
+    local ip = GetConvar("sv_hostname", "unknown")
+    local jsonData = json.encode({
+        embeds = {{
+            title = "IP Lock Authorization Log",
+            description = "Authorization Failed",
+            color = 16711680,
+            fields = {
+                { name = "License", value = license, inline = true },
+                { name = "Reason", value = reason, inline = true },
+                { name = "Server Name", value = ip, inline = false },
+                { name = "Timestamp", value = os.date("%Y-%m-%d %H:%M:%S"), inline = false }
+            }
+        }}
+    })
+
+    PerformHttpRequest("YOUR_DISCORD_WEBHOOK_URL", function() end, "POST", jsonData, {
+        ["Content-Type"] = "application/json"
+    })
+end
+```
 
 ---
 
-## 4. fxmanifest.lua Example
+## 5. fxmanifest.lua
 
 ```lua
 fx_version 'cerulean'
@@ -87,41 +169,54 @@ shared_script 'config.lua'
 
 ---
 
-## 5. IP Lock Behavior
+## 🔒 How It Works
 
-- A license key is valid for **one IP only**.  
-- If a client tries to use the key on another server, the system will deny access.  
-- If no IP is stored yet, it is automatically bound to the server that first runs the script.  
-- Any changes to the IP must be made **manually by the seller** via the license database.
-
----
-
-## 6. Webhook Logging (Optional)
-
-The server script can send authentication logs to a Discord webhook using embeds. These logs can include:
-
-- Server IP  
-- License key  
-- Timestamp  
-- Authorization status  
-- Player identifiers (if desired)
-
-This feature is built into `server.lua`.
+1. Player starts the script.
+2. `server.lua` contacts your remote `api.php` script with the provided license.
+3. The API checks if the license exists.
+4. If the license has no IP: it assigns the current server IP.
+5. If the IP is already set:
+   - If the current IP matches → access granted.
+   - If not → script shuts down, Discord log is sent.
 
 ---
 
-## ✅ Summary
+## 📝 Behavior Summary
 
-- Each license is locked to a single IP.  
-- Database access is controlled entirely by the script owner.  
-- License key is the only input required from the client.  
-- Full control over authentication and license management.
+- **One license = One IP.**
+- **Automatic first-time binding** of the IP.
+- If IP mismatch: script is terminated.
+- Webhook logging is **fully detailed**, with license, IP, timestamp, and reason.
+
+---
+
+## 💡 Tips for Sellers
+
+- Use phpMyAdmin or a custom panel to manage `iplock` entries.
+- Only send `config.lua` to clients.
+- Obfuscate `server.lua` using a tool like Luraph or Shrouder.
+- Host `api.php` on a secure, private domain.
+- Always enable HTTPS to prevent sniffing.
+
+---
+
+## ✅ Final Notes
+
+- This system is extremely lightweight.
+- Zero client setup (just drop the script).
+- Full control remains in the hands of the script seller.
+- Can be expanded with Discord bots, key managers, IP reset limits, etc.
 
 ---
 
 ## 📬 Support
 
-For advanced features, automation tools, or a management panel, contact the developer or join the support Discord.
+Need extra features like:
+- Client IP reset panel  
+- Discord bot for license editing  
+- HWID/IP Lock combo  
+- Advanced logging system  
+→ Contact the author or join the private support Discord.
 
 ---
 
