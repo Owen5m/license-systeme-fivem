@@ -52,45 +52,6 @@ CREATE TABLE IF NOT EXISTS licenses (
 
 Upload this file to your **remote web server**, for example: `https://yourdomain.com/api.php`
 
-```php
-<?php
-header('Content-Type: application/json');
-
-$pdo = new PDO("mysql:host=localhost;dbname=iplock;charset=utf8", "db_user", "db_password");
-
-$license = $_GET['license'] ?? null;
-$ip = $_SERVER['REMOTE_ADDR'];
-
-if (!$license) {
-    echo json_encode(['status' => 'error', 'message' => 'License is required']);
-    exit;
-}
-
-$stmt = $pdo->prepare("SELECT * FROM licenses WHERE license = ?");
-$stmt->execute([$license]);
-$data = $stmt->fetch(PDO::FETCH_ASSOC);
-
-if (!$data) {
-    echo json_encode(['status' => 'denied', 'message' => 'License not found']);
-    exit;
-}
-
-if ($data['ip'] === null) {
-    $stmt = $pdo->prepare("UPDATE licenses SET ip = ? WHERE license = ?");
-    $stmt->execute([$ip, $license]);
-    echo json_encode(['status' => 'granted', 'message' => 'IP assigned']);
-    exit;
-}
-
-if ($data['ip'] === $ip) {
-    echo json_encode(['status' => 'granted', 'message' => 'License and IP match']);
-    exit;
-}
-
-echo json_encode(['status' => 'denied', 'message' => 'Invalid IP for this license']);
-exit;
-?>
-```
 
 > 🔐 **Secure your API** with rate limiting, a secret key, or .htaccess rules in production.
 
@@ -110,49 +71,7 @@ This is the **only file the client edits**.
 
 ## 4. server.lua (Authentication System)
 
-```lua
-local licenseKey = Config.License
-local apiURL = "https://yourdomain.com/api.php?license=" .. licenseKey
-
-PerformHttpRequest(apiURL, function(statusCode, response, headers)
-    if statusCode ~= 200 or not response then
-        print("[IPLOCK] Server error or unreachable.")
-        StopResource(GetCurrentResourceName())
-        return
-    end
-
-    local data = json.decode(response)
-
-    if data.status == "granted" then
-        print("[IPLOCK] License is valid and IP accepted.")
-    else
-        print("[IPLOCK] License refused: " .. (data.message or "Unknown reason"))
-        sendLogToDiscord(data.message or "Refused", licenseKey)
-        StopResource(GetCurrentResourceName())
-    end
-end, "GET", "", { ["Content-Type"] = "application/json" })
-
-function sendLogToDiscord(reason, license)
-    local ip = GetConvar("sv_hostname", "unknown")
-    local jsonData = json.encode({
-        embeds = {{
-            title = "IP Lock Authorization Log",
-            description = "Authorization Failed",
-            color = 16711680,
-            fields = {
-                { name = "License", value = license, inline = true },
-                { name = "Reason", value = reason, inline = true },
-                { name = "Server Name", value = ip, inline = false },
-                { name = "Timestamp", value = os.date("%Y-%m-%d %H:%M:%S"), inline = false }
-            }
-        }}
-    })
-
-    PerformHttpRequest("YOUR_DISCORD_WEBHOOK_URL", function() end, "POST", jsonData, {
-        ["Content-Type"] = "application/json"
-    })
-end
-```
+Download server.lua.
 
 ---
 
